@@ -44,12 +44,13 @@
 #define TWT_TERMINATE_STR    "twt_terminate"
 #define TWT_PAUSE_STR        "twt_pause"
 #define TWT_RESUME_STR       "twt_resume"
+#define TWT_GET_PARAMS_STR   "TWT_GET_PARAMS"
 
-#define TWT_SETUP_STRLEN      strlen(TWT_SETUP_STR)
-#define TWT_TERMINATE_STR_LEN strlen(TWT_TERMINATE_STR)
-#define TWT_PAUSE_STR_LEN     strlen(TWT_PAUSE_STR)
-#define TWT_RESUME_STR_LEN    strlen(TWT_RESUME_STR)
-
+#define TWT_SETUP_STRLEN       strlen(TWT_SETUP_STR)
+#define TWT_TERMINATE_STR_LEN  strlen(TWT_TERMINATE_STR)
+#define TWT_PAUSE_STR_LEN      strlen(TWT_PAUSE_STR)
+#define TWT_RESUME_STR_LEN     strlen(TWT_RESUME_STR)
+#define TWT_GET_PARAMS_STR_LEN strlen(TWT_GET_PARAMS_STR)
 
 #define TWT_CMD_NOT_EXIST -EINVAL
 #define DEFAULT_IFNAME "wlan0"
@@ -85,6 +86,9 @@
 #define NEXT_TWT_STR_LEN		strlen(NEXT_TWT_STR)
 #define NEXT2_TWT_STR_LEN		strlen(NEXT2_TWT_STR)
 #define NEXT_TWT_SIZE_STR_LEN		strlen(NEXT_TWT_SIZE_STR)
+
+#define MAC_ADDR_STR "%02x:%02x:%02x:%02x:%02x:%02x"
+#define MAC_ADDR_ARRAY(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
 
 struct twt_setup_parameters {
 	u8 dialog_id;
@@ -208,6 +212,10 @@ int check_for_twt_cmd(char **cmd)
 	} else if (os_strncasecmp(*cmd, TWT_RESUME_STR, TWT_RESUME_STR_LEN) == 0) {
 		*cmd += (TWT_RESUME_STR_LEN + 1);
 		return QCA_WLAN_TWT_RESUME;
+	} else if (os_strncasecmp(*cmd, TWT_GET_PARAMS_STR,
+				  TWT_GET_PARAMS_STR_LEN) == 0) {
+		*cmd += (TWT_GET_PARAMS_STR_LEN + 1);
+		return QCA_WLAN_TWT_GET;
 	} else {
 		wpa_printf(MSG_DEBUG, "Not a TWT command");
 		return TWT_CMD_NOT_EXIST;
@@ -796,6 +804,53 @@ int prepare_twt_resume_nlmsg(struct nl_msg *nlmsg,
 	return 0;
 }
 
+static int prepare_twt_get_params_nlmsg(struct nl_msg *nlmsg, char *cmd)
+{
+	struct nlattr *twt_attr;
+	char *dialog_id_str = "dialog_id";
+	u8 dialog_id;
+	int ret = 0;
+
+	while(*cmd == ' ')
+		cmd++;
+
+	if (nla_put_u8(nlmsg, QCA_WLAN_VENDOR_ATTR_CONFIG_TWT_OPERATION,
+		       QCA_WLAN_TWT_GET)) {
+		wpa_printf(MSG_DEBUG, "TWT: Failed to put QCA_WLAN_TWT_GET");
+		goto fail;
+	}
+
+	twt_attr = nla_nest_start(nlmsg,
+				  QCA_WLAN_VENDOR_ATTR_CONFIG_TWT_PARAMS);
+	if (!twt_attr)
+		return -EINVAL;
+
+	if (os_strncasecmp(cmd, dialog_id_str, strlen(dialog_id_str)) == 0) {
+		cmd += strlen(dialog_id_str) + 1;
+
+		dialog_id = get_u8_from_string(cmd, &ret);
+		if (ret < 0)
+			return ret;
+
+		if (nla_put_u8(nlmsg, QCA_WLAN_VENDOR_ATTR_TWT_SETUP_FLOW_ID,
+			       dialog_id)) {
+			wpa_printf(MSG_DEBUG, "TWT: Failed to put dialog_id");
+			return -EINVAL;
+		}
+		wpa_printf(MSG_DEBUG, "TWT: get_param dialog_id:%d", dialog_id);
+		cmd = move_to_next_str(cmd);
+	} else {
+		wpa_printf(MSG_ERROR, "TWT: dialog_id not found");
+		goto fail;
+	}
+
+	nla_nest_end(nlmsg, twt_attr);
+	wpa_printf(MSG_DEBUG, "TWT get param nlcmd prepare end");
+	return 0;
+fail:
+	return -EINVAL;
+}
+
 static int pack_nlmsg_twt_params(struct nl_msg *twt_nl_msg, char *cmd,
 				 enum qca_wlan_twt_operation type)
 {
@@ -824,6 +879,9 @@ static int pack_nlmsg_twt_params(struct nl_msg *twt_nl_msg, char *cmd,
 		if (process_twt_resume_cmd_string(cmd, &resume_params))
 			return -EINVAL;
 		ret = prepare_twt_resume_nlmsg(twt_nl_msg, &resume_params);
+		break;
+	case QCA_WLAN_TWT_GET:
+		ret = prepare_twt_get_params_nlmsg(twt_nl_msg, cmd);
 		break;
 	default:
 		wpa_printf(MSG_DEBUG, "Unsupported command: %d", type);
@@ -855,6 +913,147 @@ char *result_copy_to_buf(char *src, char *dst_buf, int *dst_len)
 	*(dst_buf + str_len) = ' ';
 
 	return (dst_buf + str_len + 1);
+}
+
+static int
+unpack_twt_get_params_resp(struct nlattr **tb, char *buf, int buf_len)
+{
+	int cmd_id, val, len;
+	uint8_t exp;
+	uint32_t value;
+	unsigned long wake_tsf;
+	char temp[TWT_RESP_BUF_LEN];
+	char *start = buf;
+
+	os_memset(temp, 0, TWT_RESP_BUF_LEN);
+
+	/* Mac Address */
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_MAC_ADDR;
+	if (!tb[cmd_id]) {
+		wpa_printf(MSG_ERROR, "twt_get_params resp: no mac_addr");
+		return -EINVAL;
+	}
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "<mac_addr " MAC_ADDR_STR,
+		    MAC_ADDR_ARRAY((char *)nla_data(tb[cmd_id])));
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	/* Flow Id */
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_FLOW_ID;
+	if (!tb[cmd_id]) {
+		wpa_printf(MSG_ERROR, "twt_get_params resp: no dialog_id");
+		return -EINVAL;
+	}
+	val = nla_get_u8(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "dialog_id %d", val);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+
+	/* Broadcast */
+	val = 0;
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_BCAST;
+	if (tb[cmd_id])
+		val = nla_get_flag(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "bcast %d", val);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	/* Trigger Type */
+	val = 0;
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_TRIGGER;
+	if (tb[cmd_id])
+		val = nla_get_flag(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "trig_type %d", val);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	/* Announce */
+	val = 0;
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_FLOW_TYPE;
+	if (tb[cmd_id])
+		val = nla_get_flag(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "flow_type %d", val);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	/* Protection */
+	val = 0;
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_PROTECTION;
+	if (tb[cmd_id])
+		val = nla_get_flag(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "protection %d", val);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	/* info */
+	val = 0;
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_TWT_INFO_ENABLED;
+	if (tb[cmd_id])
+		val = nla_get_flag(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "info_enabled %d", val);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	/* Wake Duration */
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_WAKE_DURATION;
+	if (!tb[cmd_id]) {
+		wpa_printf(MSG_ERROR, "twt_get_params resp: no wake duration");
+		return -EINVAL;
+	}
+	value = nla_get_u32(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "wake_dur %d", value);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	/* Wake Interval Mantissa */
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_WAKE_INTVL_MANTISSA;
+	if (!tb[cmd_id]) {
+		wpa_printf(MSG_ERROR, "twt_get_params resp: no wake mantissa");
+		return -EINVAL;
+	}
+	value = nla_get_u32(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "wake_intvl_mantis %d", value);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	/* Wake Interval Exponent */
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_WAKE_INTVL_EXP;
+	if (!tb[cmd_id]) {
+		wpa_printf(MSG_ERROR, "twt_get_params resp: no wake intvl exp");
+		return -EINVAL;
+	}
+	exp = nla_get_u8(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "wake_intvl_exp %d", exp);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	/* TSF Value */
+	cmd_id = QCA_WLAN_VENDOR_ATTR_TWT_SETUP_WAKE_TIME_TSF;
+	if (!tb[cmd_id]) {
+		wpa_printf(MSG_ERROR, "twt_get_params resp: no wake time tsf");
+		return -EINVAL;
+	}
+	wake_tsf = nla_get_u64(tb[cmd_id]);
+	os_snprintf(temp, TWT_RESP_BUF_LEN, "wake_time_tsf 0x%lx>", wake_tsf);
+	buf = result_copy_to_buf(temp, buf, &buf_len);
+	if (!buf)
+		return -EINVAL;
+
+	len = (buf - start);
+	*buf = '\0';
+
+	return len;
 }
 
 static int wpa_get_twt_resume_resp_val(struct nlattr **tb2, char *buf,
@@ -1093,6 +1292,47 @@ static int wpa_get_twt_setup_resp_val(struct nlattr **tb2, char *buf,
 	return 0;
 }
 
+int unpack_twt_get_params_nlmsg(struct nl_msg **tb, char *buf, int buf_len)
+{
+	int ret, rem, id, len = 0, num_twt_sessions = 0;
+	struct nlattr *config_attr[QCA_WLAN_VENDOR_ATTR_CONFIG_TWT_MAX + 1];
+	struct nlattr *setup_attr[QCA_WLAN_VENDOR_ATTR_TWT_SETUP_MAX + 1];
+	struct nlattr *attr;
+
+	if (nla_parse_nested(config_attr, QCA_WLAN_VENDOR_ATTR_CONFIG_TWT_MAX,
+			     tb[NL80211_ATTR_VENDOR_DATA], NULL)) {
+		wpa_printf(MSG_ERROR, "twt_get_params: nla_parse_nested fail");
+		return -EINVAL;
+	}
+
+	id = QCA_WLAN_VENDOR_ATTR_CONFIG_TWT_PARAMS;
+	attr = config_attr[id];
+	if (!attr) {
+		wpa_printf(MSG_ERROR, "twt_get_params: config_twt_params fail");
+		return -EINVAL;
+	}
+
+	num_twt_sessions = 0;
+	nla_for_each_nested(attr, config_attr[id], rem) {
+		num_twt_sessions++;
+		if (nla_parse(setup_attr, QCA_WLAN_VENDOR_ATTR_TWT_SETUP_MAX,
+			      nla_data(attr), nla_len(attr), NULL)) {
+			wpa_printf(MSG_ERROR, "twt_get_params: nla_parse fail");
+			return -EINVAL;
+		}
+		ret = unpack_twt_get_params_resp(setup_attr, buf + len,
+						 buf_len);
+		if (ret < 0)
+			return ret;
+		len += ret;
+	}
+
+	wpa_printf(MSG_ERROR, "twt_get_params: number of twt sessions = %d",
+		   num_twt_sessions);
+
+	return 0;
+}
+
 int unpack_twt_resume_nlmsg(struct nlattr **tb, char *buf, int buf_len)
 {
 	int ret = 0;
@@ -1180,6 +1420,9 @@ static int unpack_nlmsg_twt_params(struct nl_msg *twt_nl_msg,
 		break;
 	case QCA_WLAN_TWT_RESUME:
 		ret = unpack_twt_resume_nlmsg(tb, buf, buf_len);
+		break;
+	case QCA_WLAN_TWT_GET:
+		ret = unpack_twt_get_params_nlmsg(tb, buf, buf_len);
 		break;
 	default:
 		wpa_printf(MSG_DEBUG, "Unsupported command: %d", type);
