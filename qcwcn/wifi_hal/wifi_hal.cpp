@@ -961,6 +961,7 @@ wifi_error wifi_wait_for_driver_ready(void)
             return WIFI_SUCCESS;
         }
         usleep(POLL_DRIVER_DURATION_US);
+        ALOGE("fopen failed, reason: %s, remaining retry count %d", strerror(errno), count);
     } while(--count > 0);
 
     ALOGE("Timed out wating on Driver ready ... ");
