@@ -30,47 +30,100 @@
 #include <netlink/object-api.h>
 #include <linux/pkt_sched.h>
 #include <dlfcn.h>
+#include <dirent.h>
+#include <string.h>
+#include "common.h"
+#include "driver_cmd_nl80211_extn.h"
 #include "common.h"
 #include "driver_cmd_nl80211_extn.h"
 
+#define MAX_OEM_LIBS 5
+#define MAX_LIB_NAME_SIZE 30
+#define CB_SUFFIX "_cb"
 
-int wpa_driver_oem_initialize(wpa_driver_oem_cb_table_t *oem_cb_table)
+int wpa_driver_oem_initialize(wpa_driver_oem_cb_table_t **oem_cb_table)
 {
+	static wpa_driver_oem_cb_table_t oem_cb_array[MAX_OEM_LIBS + 1];
 	wpa_driver_oem_get_cb_table_t *get_oem_table;
-	wpa_driver_oem_cb_table_t *oem_cb_table_local = NULL;
-
+	wpa_driver_oem_cb_table_t *oem_cb_table_local;
+	struct dirent *entry;
+	void *oem_handle_n;
+	char cb_sym_name[MAX_LIB_NAME_SIZE], *tmp;
+	DIR *oem_lib_dir;
+	unsigned int lib_n;
+#if __WORDSIZE == 64
+	char *oem_lib_path = "/vendor/lib64/";
+#else
+	char *oem_lib_path  = "/vendor/lib/";
+#endif
 	/* Return the callback table if it is already initialized*/
-	if (oem_cb_table->wpa_driver_driver_cmd_oem_cb)
+	if (*oem_cb_table)
 		return WPA_DRIVER_OEM_STATUS_SUCCESS;
 
-#if __WORDSIZE == 64
-	void* oem_handle = dlopen("/vendor/lib64/libwpa_drv_oem.so", RTLD_NOW);
-#else
-	void* oem_handle = dlopen("/vendor/lib/libwpa_drv_oem.so", RTLD_NOW);
-#endif
-	if (!oem_handle) {
+	for (lib_n = 0; lib_n < MAX_OEM_LIBS; lib_n++)
+		oem_cb_array[lib_n].wpa_driver_driver_cmd_oem_cb = NULL;
+
+	oem_lib_dir = opendir(oem_lib_path);
+	if (!oem_lib_dir) {
+		wpa_printf(MSG_ERROR, "%s: Unable to open %s", __FUNCTION__, oem_lib_path);
 		return WPA_DRIVER_OEM_STATUS_FAILURE;
 	}
 
-	get_oem_table = (wpa_driver_oem_get_cb_table_t *)dlsym(oem_handle,
-						 "oem_generic_cb_table");
-	if (!get_oem_table) {
-		wpa_printf(MSG_ERROR, "%s: NULL oem callback table",
-			   __FUNCTION__);
-		return WPA_DRIVER_OEM_STATUS_FAILURE;
+	lib_n = 0;
+	while((entry = readdir(oem_lib_dir)) != NULL) {
+		if (strncmp(entry->d_name, "libwpa_drv_oem", 14))
+			continue;
+
+		wpa_printf(MSG_DEBUG, "%s: Opening lib %s", __FUNCTION__, entry->d_name);
+		oem_handle_n = dlopen(entry->d_name, RTLD_NOW);
+
+		if (!oem_handle_n) {
+			wpa_printf(MSG_ERROR, "%s: Could not load %s", __FUNCTION__, entry->d_name);
+			/* let's not worry much, continue with others */
+			continue;
+		}
+
+		if (strlen(entry->d_name)  >= (sizeof(cb_sym_name) - sizeof(CB_SUFFIX))) {
+			wpa_printf(MSG_ERROR, "%s: libname (%s) too lengthy", __FUNCTION__, entry->d_name);
+			continue;
+		}
+
+		os_strlcpy(cb_sym_name, entry->d_name, sizeof(cb_sym_name));
+		tmp = strchr(cb_sym_name, '.');
+		if (!tmp) {
+			wpa_printf(MSG_ERROR, "%s: libname (%s) incorrect?", __FUNCTION__, entry->d_name);
+			continue;
+		}
+
+		os_strlcpy(tmp, CB_SUFFIX, sizeof(CB_SUFFIX));
+		wpa_printf(MSG_DEBUG, "%s: Loading sym %s", __FUNCTION__, cb_sym_name);
+
+		/* Get the lib's function table callback */
+		get_oem_table = (wpa_driver_oem_get_cb_table_t *)dlsym(oem_handle_n,
+				cb_sym_name);
+
+		if (!get_oem_table) {
+			wpa_printf(MSG_ERROR, "%s: Could not get sym table", __FUNCTION__);
+			continue;
+		}
+
+		oem_cb_table_local = get_oem_table();
+
+		oem_cb_array[lib_n].wpa_driver_driver_cmd_oem_cb = oem_cb_table_local->wpa_driver_driver_cmd_oem_cb;
+
+		lib_n++;
+
+		if (lib_n == MAX_OEM_LIBS) {
+			wpa_printf(MSG_DEBUG, "%s: Exceeded max libs %d", __FUNCTION__, lib_n);
+			break;
+		}
 	}
 
-	oem_cb_table_local = get_oem_table();
-
-	if (!oem_cb_table_local ||
-		!oem_cb_table_local->wpa_driver_driver_cmd_oem_cb) {
-		wpa_printf(MSG_ERROR, "%s: oem module returned NULL table",
-			   __FUNCTION__);
-		return WPA_DRIVER_OEM_STATUS_FAILURE;
+	if (lib_n) {
+		oem_cb_array[lib_n].wpa_driver_driver_cmd_oem_cb = NULL;
+		*oem_cb_table = oem_cb_array;
+		wpa_printf(MSG_DEBUG, "%s: OEM lib initialized\n", __func__);
 	}
-	oem_cb_table->wpa_driver_driver_cmd_oem_cb =
-                            oem_cb_table_local->wpa_driver_driver_cmd_oem_cb;
-	wpa_printf(MSG_INFO, "%s: OEM lib initialized\n", __func__);
 
 	return WPA_DRIVER_OEM_STATUS_SUCCESS;
 }
