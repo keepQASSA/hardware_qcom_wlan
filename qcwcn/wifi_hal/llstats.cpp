@@ -1252,6 +1252,12 @@ wifi_error wifi_set_link_stats(wifi_interface_handle iface,
     struct nlattr *nl_data;
     interface_info *iinfo = getIfaceInfo(iface);
     wifi_handle handle = getWifiHandle(iface);
+    hal_info *info = getHalInfo(handle);
+
+    if (!(info->supported_feature_set & WIFI_FEATURE_LINK_LAYER_STATS)) {
+        ALOGI("%s: LLS is not supported by driver", __FUNCTION__);
+        return WIFI_ERROR_NOT_SUPPORTED;
+    }
 
     ALOGI("mpdu_size_threshold : %u, aggressive_statistics_gathering : %u",
           params.mpdu_size_threshold, params.aggressive_statistics_gathering);
@@ -1306,6 +1312,12 @@ wifi_error wifi_get_link_stats(wifi_request_id id,
     struct nlattr *nl_data;
     interface_info *iinfo = getIfaceInfo(iface);
     wifi_handle handle = getWifiHandle(iface);
+    hal_info *info = getHalInfo(handle);
+
+    if (!(info->supported_feature_set & WIFI_FEATURE_LINK_LAYER_STATS)) {
+        ALOGI("%s: LLS is not supported by driver", __FUNCTION__);
+        return WIFI_ERROR_NOT_SUPPORTED;
+    }
 
     LLCommand = LLStatsCommand::instance(handle);
     if (LLCommand == NULL) {
@@ -1370,6 +1382,12 @@ wifi_error wifi_clear_link_stats(wifi_interface_handle iface,
     struct nlattr *nl_data;
     interface_info *iinfo = getIfaceInfo(iface);
     wifi_handle handle = getWifiHandle(iface);
+    hal_info *info = getHalInfo(handle);
+
+    if (!(info->supported_feature_set & WIFI_FEATURE_LINK_LAYER_STATS)) {
+        ALOGI("%s: LLS is not supported by driver", __FUNCTION__);
+        return WIFI_ERROR_NOT_SUPPORTED;
+    }
 
     ALOGI("clear_req : %x, stop_req : %u", stats_clear_req_mask, stop_req);
     LLCommand = LLStatsCommand::instance(handle);
