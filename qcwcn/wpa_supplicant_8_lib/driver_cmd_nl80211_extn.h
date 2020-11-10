@@ -34,8 +34,12 @@
 #include "qca-vendor.h"
 
 #define IFNAMSIZ 16
-#define WPA_DRIVER_OEM_STATUS_SUCCESS 0
-#define WPA_DRIVER_OEM_STATUS_FAILURE 255
+
+enum wpa_driver_oem_status {
+	WPA_DRIVER_OEM_STATUS_SUCCESS = 0,
+	WPA_DRIVER_OEM_STATUS_FAILURE = -1,
+	WPA_DRIVER_OEM_STATUS_ENOSUPP = -2,
+};
 
 /*
  * This structure is a table of function pointers to the functions
@@ -49,5 +53,5 @@ typedef struct
 
 typedef wpa_driver_oem_cb_table_t* (wpa_driver_oem_get_cb_table_t)();
 
-int wpa_driver_oem_initialize(wpa_driver_oem_cb_table_t *oem_lib_params);
+int wpa_driver_oem_initialize(wpa_driver_oem_cb_table_t **oem_lib_params);
 #endif
