@@ -2793,11 +2793,29 @@ int wpa_driver_nl80211_driver_cmd(void *priv, char *cmd, char *buf,
 					  "Macaddr = " MACSTR "\n", MAC2STR(macaddr));
 	} else if ((ret = check_for_twt_cmd(&cmd)) != TWT_CMD_NOT_EXIST) {
 		enum qca_wlan_twt_operation twt_oper = ret;
+		u8 is_twt_feature_supported = 0;
 
-		ret = wpa_driver_twt_cmd_handler(drv, bss->ifname, twt_oper, cmd, buf, buf_len,
-						 &status);
-		if (ret)
-			ret = os_snprintf(buf, buf_len, "TWT failed for operation %d", twt_oper);
+		if (oem_cb_table) {
+			for (lib_n = 0;
+			     oem_cb_table[lib_n].wpa_driver_driver_cmd_oem_cb != NULL;
+			     lib_n++)
+			{
+				if (oem_cb_table[lib_n].wpa_driver_oem_feature_check_cb) {
+					if (oem_cb_table[lib_n].wpa_driver_oem_feature_check_cb(FEATURE_TWT_SUPPORT))
+						is_twt_feature_supported = 1;
+				}
+			}
+		}
+
+		if (is_twt_feature_supported) {
+			wpa_printf(MSG_ERROR, "%s: TWT feature already supported by oem lib\n", __func__);
+			ret = -EINVAL;
+		} else {
+			ret = wpa_driver_twt_cmd_handler(drv, bss->ifname, twt_oper, cmd, buf, buf_len,
+							 &status);
+			if (ret)
+				ret = os_snprintf(buf, buf_len, "TWT failed for operation %d", twt_oper);
+		}
 	} else { /* Use private command */
 		memset(&ifr, 0, sizeof(ifr));
 		memset(&priv_cmd, 0, sizeof(priv_cmd));
