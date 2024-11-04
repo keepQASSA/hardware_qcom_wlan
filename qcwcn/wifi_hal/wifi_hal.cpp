@@ -889,6 +889,12 @@ wifi_error wifi_initialize(wifi_handle *handle)
         goto unload;
     }
 
+    ret = initializeRadioHandler(info);
+    if (ret != WIFI_SUCCESS) {
+        ALOGE("Initializing Radio Event handler Failed");
+        goto unload;
+    }
+
     ret = wifi_init_tcp_param_change_event_handler(iface_handle);
     if (ret != WIFI_SUCCESS) {
         ALOGE("Initializing TCP param change event Handler Failed");
@@ -928,6 +934,7 @@ unload:
             wifi_logger_ring_buffers_deinit(info);
             cleanupGscanHandlers(info);
             cleanupRSSIMonitorHandler(info);
+            cleanupRadioHandler(info);
 	    cleanupTCPParamCommand(info);
             free(info->event_cb);
             if (info->driver_supported_features.flags) {
@@ -954,6 +961,7 @@ wifi_error wifi_wait_for_driver_ready(void)
             return WIFI_SUCCESS;
         }
         usleep(POLL_DRIVER_DURATION_US);
+        ALOGE("fopen failed, reason: %s, remaining retry count %d", strerror(errno), count);
     } while(--count > 0);
 
     ALOGE("Timed out wating on Driver ready ... ");
@@ -1022,6 +1030,7 @@ static void internal_cleaned_up_handler(wifi_handle handle)
     wifi_logger_ring_buffers_deinit(info);
     cleanupGscanHandlers(info);
     cleanupRSSIMonitorHandler(info);
+    cleanupRadioHandler(info);
     cleanupTCPParamCommand(info);
 
     if (info->num_event_cb)
@@ -1080,6 +1089,11 @@ static int validate_cld80211_msg(nlmsghdr *nlh, int family, int cmd)
     struct genlmsghdr *hdr;
     hdr = (genlmsghdr *)nlmsg_data(nlh);
 
+    if (nlh->nlmsg_len > DEFAULT_PAGE_SIZE - sizeof(wifihal_ctrl_req_t))
+    {
+      ALOGE("%s: Invalid nlmsg length", __FUNCTION__);
+      return -1;
+    }
     if(hdr->cmd == WLAN_NL_MSG_OEM)
     {
       ALOGV("%s: FAMILY ID : %d ,NL CMD : %d received", __FUNCTION__,
@@ -1103,6 +1117,11 @@ static int validate_genl_msg(nlmsghdr *nlh, int family, int cmd)
     struct genlmsghdr *hdr;
     hdr = (genlmsghdr *)nlmsg_data(nlh);
 
+    if (nlh->nlmsg_len > DEFAULT_PAGE_SIZE - sizeof(wifihal_ctrl_req_t))
+    {
+      ALOGE("%s: Invalid nlmsg length", __FUNCTION__);
+      return -1;
+    }
     if(hdr->cmd == NL80211_CMD_FRAME ||
        hdr->cmd == NL80211_CMD_REGISTER_ACTION)
     {
@@ -1220,9 +1239,17 @@ static int register_monitor_sock(wifi_handle handle, wifihal_ctrl_req_t *ctrl_ms
        genlh = (struct genlmsghdr *)nlmsg_data(nlh);
        struct nlattr *nlattrs[NL80211_ATTR_MAX + 1];
 
-       nla_parse(nlattrs, NL80211_ATTR_MAX, genlmsg_attrdata(genlh, 0),
-                 genlmsg_attrlen(genlh, 0), NULL);
-
+       if (nlh->nlmsg_len > DEFAULT_PAGE_SIZE - sizeof(*ctrl_msg))
+       {
+         ALOGE("%s: Invalid nlmsg length", __FUNCTION__);
+         return -1;
+       }
+       if (nla_parse(nlattrs, NL80211_ATTR_MAX, genlmsg_attrdata(genlh, 0),
+                 genlmsg_attrlen(genlh, 0), NULL))
+       {
+         ALOGE("unable to parse nl attributes");
+         return -1;
+       }
        if (!nlattrs[NL80211_ATTR_FRAME_TYPE])
        {
          ALOGD("No Valid frame type");
@@ -1595,18 +1622,17 @@ static int internal_valid_message_handler(nl_msg *msg, void *arg)
          ALOGD("No Frame body");
          return WIFI_SUCCESS;
        }
-
-       ctrl_evt = (wifihal_ctrl_event_t *)malloc(DEFAULT_PAGE_SIZE);
+       ctrl_evt = (wifihal_ctrl_event_t *)malloc(sizeof(*ctrl_evt) + nlh->nlmsg_len);
        if(ctrl_evt == NULL)
        {
          ALOGE("Memory allocation failure");
          return -1;
        }
-       memset((char *)ctrl_evt, 0, DEFAULT_PAGE_SIZE);
+       memset((char *)ctrl_evt, 0, sizeof(*ctrl_evt) + nlh->nlmsg_len);
        ctrl_evt->family_name = GENERIC_NL_FAMILY;
        ctrl_evt->cmd_id = cmd;
-       ctrl_evt->data_len = msg->nm_nlh->nlmsg_len;
-       memcpy(ctrl_evt->data, (char *)msg->nm_nlh, ctrl_evt->data_len);
+       ctrl_evt->data_len = nlh->nlmsg_len;
+       memcpy(ctrl_evt->data, (char *)nlh, ctrl_evt->data_len);
 
 
        buff = (char *)nla_data(nlattrs[NL80211_ATTR_FRAME]) + 24; //! Size of Wlan80211FrameHeader
@@ -1766,7 +1792,8 @@ static int wifi_get_multicast_id(wifi_handle handle, const char *name,
 static bool is_wifi_interface(const char *name)
 {
     if (strncmp(name, "wlan", 4) != 0 && strncmp(name, "p2p", 3) != 0
-        && strncmp(name, "wifi", 4) != 0) {
+        && strncmp(name, "wifi", 4) != 0
+        && strncmp(name, "swlan", 5) != 0) {
         /* not a wifi interface; ignore it */
         return false;
     } else {

@@ -47,6 +47,7 @@
 #include <errno.h>
 #include "wifi_hal_ctrl.h"
 
+#define MAX_EVENT_REASON_CODE 1024
 static uint32_t get_le32(const uint8_t *pos)
 {
     return pos[0] | (pos[1] << 8) | (pos[2] << 16) | (pos[3] << 24);
@@ -849,10 +850,10 @@ static wifi_error process_beacon_received_event(hal_info *info,
     return status;
 }
 
-static wifi_error process_fw_diag_msg(hal_info *info, u8* buf, u16 length)
+static wifi_error process_fw_diag_msg(hal_info *info, u8* buf, u32 length)
 {
-    u16 count = 0, id;
-    u16 payloadlen = 0;
+    u32 count = 0, id;
+    u32 payloadlen = 0;
     u16 hdr_size = 0;
     wifi_error status;
     fw_diag_msg_fixed_hdr_t *diag_msg_fixed_hdr;
@@ -1247,11 +1248,17 @@ static void process_wlan_data_stall_event(hal_info *info,
                                           int length)
 {
    wlan_data_stall_event_t *event;
+   int reason_code = 0;
 
    ALOGV("Received Data Stall Event from Driver");
    event = (wlan_data_stall_event_t *)buf;
    ALOGE("Received Data Stall event, sending alert %d", event->reason);
-   send_alert(info, DATA_STALL_OFFSET_REASON_CODE + event->reason);
+   if(event->reason >= MAX_EVENT_REASON_CODE)
+       reason_code = 0;
+   else
+       reason_code = event->reason;
+
+   send_alert(info, DATA_STALL_OFFSET_REASON_CODE + reason_code);
 }
 
 static void process_wlan_low_resource_failure(hal_info *info,
@@ -2613,15 +2620,23 @@ wifi_error diag_message_handler(hal_info *info, nl_msg *msg)
                 if (tb_vendor[CLD80211_ATTR_DATA]) {
                     clh = (tAniCLDHdr *)nla_data(tb_vendor[CLD80211_ATTR_DATA]);
                 }
+            } else {
+                ALOGE("Invalid data received");
+                return WIFI_SUCCESS;
             }
-            if (!clh) {
+            if (genlh->cmd != WLAN_NL_MSG_OEM && !clh) {
                 ALOGE("Invalid data received from driver");
                 return WIFI_SUCCESS;
             }
+
             if((info->wifihal_ctrl_sock.s > 0) && (genlh->cmd == WLAN_NL_MSG_OEM)) {
                wifihal_ctrl_event_t *ctrl_evt;
                wifihal_mon_sock_t *reg;
 
+               if (!(tb_vendor[CLD80211_ATTR_DATA] || tb_vendor[CLD80211_ATTR_CMD])) {
+                   ALOGE("Invalid oem data received from driver");
+                   return WIFI_SUCCESS;
+               }
                ctrl_evt = (wifihal_ctrl_event_t *)malloc(sizeof(*ctrl_evt) + nlh->nlmsg_len);
 
                if(ctrl_evt == NULL)
@@ -2668,6 +2683,7 @@ wifi_error diag_message_handler(hal_info *info, nl_msg *msg)
                    }
                }
                free(ctrl_evt);
+               return WIFI_SUCCESS;
             }
         }
     } else {
@@ -2805,20 +2821,20 @@ wifi_error diag_message_handler(hal_info *info, nl_msg *msg)
         diag_fw_type = event_hdr->diag_type;
         if (diag_fw_type == DIAG_TYPE_FW_MSG) {
             dbglog_slot *slot;
-            u16 length = 0;
+            u32 length = 0;
 
             slot = (dbglog_slot *)buf;
+            length = get_le32((u8 *)&slot->length);
             if (nlh->nlmsg_len < (NLMSG_HDRLEN + sizeof(dbglog_slot) +
-                                        slot->length)) {
+                                        length)) {
                 ALOGE("Received CNSS_DIAG message with insufficent length: %d:"
                               " expected: %zu, %s:%d",
                       nlh->nlmsg_len,
-                      (NLMSG_HDRLEN + sizeof(dbglog_slot) +slot->length),
+                      (NLMSG_HDRLEN + sizeof(dbglog_slot) +length),
                       __FUNCTION__,
                       __LINE__);
                 return WIFI_ERROR_UNKNOWN;
             }
-            length = get_le32((u8 *)&slot->length);
             process_fw_diag_msg(info, &slot->payload[0], length);
         }
     }
